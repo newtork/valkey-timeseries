@@ -53,6 +53,23 @@ class TestTimeSeriesRange(ValkeyTimeSeriesTestCaseBase):
         result = self.client.execute_command('TS.RANGE', 'ts1', '-', '+', 'FILTER_BY_TS', 1000, 3000, 5000)
         assert result == [[1000, b'10.1'], [3000, b'30.3'], [5000, b'50.5']]
 
+    def test_range_filter_single_item(self):
+        """Test TS.RANGE with FILTER_BY_TS"""
+
+        self.setup_data()
+
+        result = self.client.execute_command('TS.RANGE', 'ts1', '-', '+', 'FILTER_BY_TS', 3000)
+        assert result == [[3000, b'30.3']]
+
+        self.client.execute_command('TS.ADD', 'single', 1000, 10.0)
+        result = self.client.execute_command('TS.RANGE', 'single', 1000, 1000)
+        assert result == [[1000, b'10']]
+
+        result = self.client.execute_command('TS.RANGE', 'single', 1000, 1000, 'FILTER_BY_TS', 1000)
+        assert result == [[1000, b'10']]
+
+
+
     def test_range_filter_by_value(self):
         """Test TS.RANGE with FILTER_BY_VALUE"""
 
