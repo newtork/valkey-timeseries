@@ -262,6 +262,21 @@ mod tests {
         assert_eq!(samples[1].timestamp, 3000);
         assert_eq!(samples[2].timestamp, 5000);
 
+        // Test with single timestamp in filter
+        let options_single = RangeOptions {
+            date_range: date_range(0, 10000),
+            count: None,
+            aggregation: None,
+            timestamp_filter: Some(vec![2000]),
+            value_filter: None,
+            latest: false,
+        };
+
+        let iter_single = TimeSeriesRangeIterator::new(None, &series, &options_single, false);
+        let samples_single: Vec<Sample> = iter_single.collect();
+        assert_eq!(samples_single.len(), 1);
+        assert_eq!(samples_single[0].timestamp, 2000);
+
         // test the reverse iteration with a timestamp filter
         let rev_iter = TimeSeriesRangeIterator::new(None, &series, &options, true);
         let rev_samples: Vec<Sample> = rev_iter.collect();
