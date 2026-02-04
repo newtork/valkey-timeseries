@@ -76,10 +76,10 @@ impl GorillaChunk {
     }
 
     pub fn bytes_per_sample(&self) -> usize {
-        let mut count = self.len();
+        let count = self.len();
         if count == 0 {
             // estimate 50%
-            count = 2;
+            return size_of::<Sample>() / 2;
         }
         self.data_size() / count
     }

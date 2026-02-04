@@ -147,11 +147,12 @@ fn add_chunks_for_remaining_samples<'a>(
     // based on max chunk size and encoding, estimate capacity
     let chunk_size = series.chunk_size_bytes;
     // if we're compressed, estimate how many samples per chunk based on a conservative compression ratio of 2:1
+    let sample_size = size_of::<Sample>();
     let sample_capacity = if is_compressed {
-        chunk_size / 2
+        chunk_size / (sample_size / 2)
     } else {
         // uncompressed, so each sample is 16 bytes (8 bytes timestamp + 8 bytes value)
-        chunk_size / size_of::<Sample>()
+        chunk_size / sample_size
     };
 
     // chunk the samples into new chunks
@@ -616,6 +617,7 @@ mod tests {
             .samples(count)
             .start(1000)
             .interval(Duration::from_millis(1000))
+            .decimal_digits(4)
             .build()
             .generate()
     }
