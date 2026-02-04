@@ -36,17 +36,17 @@ impl GetSize for CompactionRule {
 }
 
 impl CompactionRule {
-    fn calc_bucket_start(&self, ts: Timestamp) -> Timestamp {
+    pub(crate) fn calc_bucket_start(&self, ts: Timestamp) -> Timestamp {
         calc_bucket_start(ts, self.align_timestamp, self.bucket_duration)
     }
 
-    fn get_bucket_range(&self, ts: Timestamp) -> (Timestamp, Timestamp) {
+    pub(super) fn get_bucket_range(&self, ts: Timestamp) -> (Timestamp, Timestamp) {
         let start = self.calc_bucket_start(ts);
         let end = start.saturating_add_unsigned(self.bucket_duration);
         (start, end)
     }
 
-    fn reset(&mut self) {
+    pub(super) fn reset(&mut self) {
         self.aggregator.reset();
         self.bucket_start = None;
     }
@@ -463,7 +463,10 @@ fn apply_rules_parallel_or_seq(
     }
 }
 
-fn get_destination_series(ctx: &'_ Context, dest_id: SeriesRef) -> Option<SeriesGuardMut<'_>> {
+pub(super) fn get_destination_series(
+    ctx: &'_ Context,
+    dest_id: SeriesRef,
+) -> Option<SeriesGuardMut<'_>> {
     if let Ok(Some(res)) = get_series_by_id(ctx, dest_id, false, None)
         && res.is_compaction()
     {

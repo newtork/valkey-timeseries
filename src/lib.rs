@@ -155,6 +155,7 @@ valkey_module! {
         ["TS.DEL", commands::del, "write deny-oom", 1, 1, 1, "write timeseries"],
         ["TS.DECRBY", commands::decrby, "write deny-oom", 1, 1, 1, "write timeseries"],
         ["TS.INCRBY", commands::incrby, "write deny-oom", 1, 1, 1, "write timeseries"],
+        ["TS.INGEST", commands::ingest, "write deny-oom", 1, 1, 1, "write timeseries"],
         ["TS.JOIN", commands::join, "readonly", 1, 2, 1, "read timeseries"],
         ["TS.MDEL", commands::mdel, "write deny-oom", 0, 0, -1, "write timeseries"],
         ["TS.MRANGE", commands::mrange, "readonly", 0, 0, -1, "read timeseries"],

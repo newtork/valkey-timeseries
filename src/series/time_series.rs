@@ -24,6 +24,7 @@ use orx_parallel::{IntoParIter, ParIter, Parallelizable, ParallelizableCollectio
 use smallvec::SmallVec;
 use std::hash::Hash;
 use std::mem::size_of;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use std::vec;
 use valkey_module::digest::Digest;
@@ -254,7 +255,7 @@ impl TimeSeries {
         self.chunks.push(new_chunk);
     }
 
-    fn create_chunk(&mut self) -> TimeSeriesChunk {
+    pub(super) fn create_chunk(&mut self) -> TimeSeriesChunk {
         TimeSeriesChunk::new(self.chunk_compression, self.chunk_size_bytes)
     }
 
@@ -350,6 +351,51 @@ impl TimeSeries {
             }
             Err(_) => SampleAddResult::Error(error_consts::CHUNK_SPLIT),
         }
+    }
+
+    pub(crate) fn split_chunks_if_needed(&mut self) -> TsdbResult<()> {
+        let errored: AtomicBool = AtomicBool::new(false);
+
+        // todo: track error, but allow partials
+        let new_chunks = if self.is_compressed() {
+            self.chunks
+                .par_mut()
+                .filter(|c| c.is_full())
+                .flat_map(|chunks| {
+                    if let Ok(split_chunk) = chunks.split() {
+                        Some(split_chunk)
+                    } else {
+                        errored.store(true, std::sync::atomic::Ordering::Relaxed);
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        } else {
+            let mut new_chunks = Vec::with_capacity(usize::max(2, self.chunks.len() / 6));
+            for c in self.chunks.iter_mut().filter(|c| c.is_full()) {
+                if let Ok(split_chunk) = c.split() {
+                    new_chunks.push(split_chunk);
+                } else {
+                    errored.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            new_chunks
+        };
+
+        if !new_chunks.is_empty() {
+            self.chunks.extend(new_chunks);
+            self.chunks.sort_by_key(|chunk| chunk.first_timestamp());
+        }
+
+        if errored.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(TsdbError::ChunkSplitError);
+        }
+
+        Ok(())
+    }
+
+    pub(super) fn recalculate_total_samples(&mut self) {
+        self.total_samples = self.chunks.iter().map(|c| c.len()).sum();
     }
 
     /// Merges a collection of samples into the time series.
@@ -691,7 +737,7 @@ impl TimeSeries {
         Ok(self.add(timestamp, value, Some(DuplicatePolicy::KeepLast)))
     }
 
-    fn update_first_last_timestamps(&mut self) {
+    pub(super) fn update_first_last_timestamps(&mut self) {
         if let Some(first_chunk) = self.chunks.first() {
             self.first_timestamp = first_chunk.first_timestamp();
         } else {

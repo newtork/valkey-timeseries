@@ -155,12 +155,10 @@ impl Chunk for GorillaChunk {
     }
 
     fn add_sample(&mut self, sample: &Sample) -> TsdbResult {
-        if self.is_full() {
-            return Err(TsdbError::CapacityFull(self.max_size));
-        }
-
-        push_sample(&mut self.encoder, sample)?;
-        Ok(())
+        // if self.is_full() {
+        //     return Err(TsdbError::CapacityFull(self.max_size));
+        // }
+        push_sample(&mut self.encoder, sample)
     }
 
     fn get_range(&self, start: Timestamp, end: Timestamp) -> TsdbResult<Vec<Sample>> {

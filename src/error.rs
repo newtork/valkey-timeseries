@@ -63,6 +63,9 @@ pub enum TsdbError {
     #[error("TSDB: error decoding chunk")]
     ChunkDecoding,
 
+    #[error("TSDB: error splitting chunk")]
+    ChunkSplitError,
+
     #[error("End of stream")]
     EndOfStream,
 }
