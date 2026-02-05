@@ -1,3 +1,8 @@
+//! Ingest samples at ludicrous speed.
+//!
+//! This module provides bulk insertion of samples into a time series, with support for duplicate
+//! policies and automatic compaction handling. It is optimized for high-throughput data ingestion
+//! scenarios by leveraging parallel processing and efficient sample merging.
 use crate::aggregators::{AggregationHandler, Aggregator};
 use crate::common::{Sample, Timestamp};
 use crate::error::TsdbResult;
@@ -15,6 +20,11 @@ use std::ops::RangeInclusive;
 use std::sync::Mutex;
 use valkey_module::{Context, NotifyEvent, ValkeyError, ValkeyResult};
 
+pub const MAX_SAMPLES_PER_INSERT: usize = 1_000;
+const COMPRESSION_RATIO_CONSERVATIVE: f64 = 2.0;
+const EARLY_CHUNK_CAPACITY_FACTOR: f64 = 0.7;
+const EARLY_CHUNK_SAMPLE_THRESHOLD: usize = 10;
+
 #[derive(Debug)]
 pub struct IngestedSamples {
     pub metric_name: String,
@@ -26,20 +36,11 @@ impl IngestedSamples {
     pub fn from_json_lines(input: &mut [u8]) -> ValkeyResult<Self> {
         let v: Value = simd_json::to_borrowed_value(input)?;
 
-        // Parse values array
         let values_arr = v
             .get("values")
             .and_then(|v| v.as_array())
             .ok_or(ValkeyError::Str("TSDB: missing values"))?;
 
-        let mut values = Vec::with_capacity(values_arr.len());
-        for val in values_arr {
-            if let Some(f) = val.cast_f64() {
-                values.push(f);
-            }
-        }
-
-        // Parse timestamps array
         let timestamps_arr = v
             .get("timestamps")
             .and_then(|t| t.as_array())
@@ -55,31 +56,31 @@ impl IngestedSamples {
             ));
         }
 
-        let mut timestamps = Vec::with_capacity(timestamps_arr.len());
-        for ts in timestamps_arr {
-            if let Some(i) = ts.as_u64() {
-                timestamps.push(i as i64);
-            }
+        if values_arr.len() > MAX_SAMPLES_PER_INSERT {
+            return Err(ValkeyError::Str(error_consts::TOO_MANY_SAMPLES));
         }
 
-        // Validate that values and timestamps have the same length
-        if values.len() != timestamps.len() {
-            return Err(ValkeyError::Str(
-                "TSDB: values and timestamps length mismatch",
-            ));
-        }
+        let mut samples = Vec::with_capacity(values_arr.len());
+        for (val, ts) in values_arr.iter().zip(timestamps_arr.iter()) {
+            let value = val
+                .cast_f64()
+                .ok_or(ValkeyError::Str("TSDB: invalid value (expected number)"))?;
 
-        let mut samples: Vec<Sample> = values
-            .iter()
-            .zip(timestamps.iter())
-            .map(|(&value, &timestamp)| Sample { timestamp, value })
-            .collect();
+            let timestamp_u64 = ts
+                .as_u64()
+                .ok_or(ValkeyError::Str("TSDB: invalid timestamp (expected u64)"))?;
+
+            samples.push(Sample {
+                timestamp: timestamp_u64 as i64,
+                value,
+            });
+        }
 
         samples.sort_by_key(|s| s.timestamp);
 
         Ok(IngestedSamples {
-            metric_name: "".to_string(),
-            key: "".to_string(),
+            metric_name: String::new(),
+            key: String::new(),
             samples,
         })
     }
@@ -106,20 +107,18 @@ fn exec_merge(
     samples: &[Sample],
     policy: Option<DuplicatePolicy>,
 ) -> Vec<SampleAddResult> {
-    match chunk.merge_samples(samples, policy) {
-        Ok(chunk_results) => chunk_results,
-        Err(_e) => {
-            let err = SampleAddResult::Error(error_consts::CANNOT_ADD_SAMPLE);
-            samples.iter().map(|_| err).collect()
-        }
-    }
+    chunk.merge_samples(samples, policy).unwrap_or_else(|_| {
+        let err = SampleAddResult::Error(error_consts::CANNOT_ADD_SAMPLE);
+        std::iter::repeat_n(err, samples.len()).collect()
+    })
 }
 
+#[inline]
 fn calculate_capacity(chunk: &TimeSeriesChunk) -> usize {
     let mut capacity = chunk.estimate_remaining_sample_capacity();
 
-    if capacity > 0 && chunk.len() < 10 && chunk.is_compressed() {
-        capacity = (capacity as f64 * 0.7).floor() as usize;
+    if capacity > 0 && chunk.len() < EARLY_CHUNK_SAMPLE_THRESHOLD && chunk.is_compressed() {
+        capacity = (capacity as f64 * EARLY_CHUNK_CAPACITY_FACTOR).floor() as usize;
         capacity = capacity.max(1);
     }
 
@@ -196,7 +195,9 @@ fn group_samples_by_chunk<'a>(
     }
     let samples = &samples[start_idx..];
 
-    let mut out: Vec<ChunkSampleGroup<'a>> = Vec::new();
+    // Pre-allocate based on chunk count + potential new chunks
+    let estimated_groups = series.chunks.len().saturating_add(2);
+    let mut out: Vec<ChunkSampleGroup<'a>> = Vec::with_capacity(estimated_groups);
 
     // handle samples older than the first existing chunk by creating new chunk(s).
     let first_chunk_start = series
@@ -251,14 +252,18 @@ fn group_samples_by_chunk<'a>(
     out
 }
 
-/// Produce disjoint `&mut` references for unique indices.
-/// Returns (original_position_in_indices, &mut element).
+/// Produces disjoint `&mut` references for unique indices.
 ///
-/// # Safety model
-/// This is safe as long as `indices` are:
-/// - in-bounds
-/// - strictly unique
-/// - indices are non-decreasing
+/// # Safety Requirements
+/// Callers MUST ensure that `indices`:
+/// - Are all within bounds of `slice`
+/// - Are strictly unique (no duplicates)
+/// - Are sorted in non-decreasing order
+///
+/// Violating these invariants leads to undefined behavior.
+///
+/// # Panics
+/// Panics in debug builds if indices are not non-decreasing.
 fn disjoint_get_many_mut_with_pos<'a, T>(slice: &'a mut [T], indices: &[usize]) -> Vec<&'a mut T> {
     let mut out: Vec<&'a mut T> = Vec::with_capacity(indices.len());
     let mut base = 0usize;
@@ -294,15 +299,26 @@ pub fn bulk_insert_samples(
     }
 
     // separate groups into existing-chunk and new-chunk categories.
-    let mut existing_groups: Vec<(usize, usize, &[Sample])> = Vec::new(); // (group_pos, chunk_idx)
-    let mut new_groups: Vec<(usize, &[Sample])> = Vec::new(); // (group_pos, samples)
+    let (new_groups, existing_groups): (Vec<_>, Vec<_>) = groups
+        .iter()
+        .enumerate()
+        .partition(|(_, g)| matches!(g.chunk, ChunkHolder::New));
 
-    for (pos, g) in groups.iter().enumerate() {
-        match g.chunk {
-            ChunkHolder::ExistingIdx(idx) => existing_groups.push((pos, idx, g.samples)),
-            ChunkHolder::New => new_groups.push((pos, g.samples)),
-        }
-    }
+    let existing_groups: Vec<_> = existing_groups
+        .into_iter()
+        .filter_map(|(pos, g)| {
+            if let ChunkHolder::ExistingIdx(idx) = g.chunk {
+                Some((pos, idx, g.samples))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let new_groups: Vec<_> = new_groups
+        .into_iter()
+        .map(|(pos, g)| (pos, g.samples))
+        .collect();
 
     // Prepare result slots.
     let mut group_results: Vec<Option<Vec<SampleAddResult>>> = vec![None; groups.len()];
@@ -395,8 +411,10 @@ pub fn bulk_insert_samples(
             })
             .collect();
 
-        if !added.is_empty() {
-            run_compactions(ctx, series, &added).ok();
+        if let Err(e) = run_compactions(ctx, series, &added) {
+            ctx.log_warning(&format!(
+                "Failed to run compactions after bulk insert samples: {e:?}"
+            ))
         }
     }
 
@@ -415,7 +433,7 @@ pub fn run_compactions(
     series: &mut TimeSeries,
     samples: &[Sample],
 ) -> TsdbResult<()> {
-    if series.rules.is_empty() {
+    if series.rules.is_empty() || samples.is_empty() {
         return Ok(());
     }
 
@@ -482,35 +500,29 @@ fn get_compacted_samples(
 }
 
 fn collect_input_ranges(rule: &CompactionRule, samples: &[Sample]) -> RangeSetBlaze<Timestamp> {
-    // construct ranges of samples to be processed per destination chunk
-    let mut ranges: RangeSetBlaze<Timestamp> = RangeSetBlaze::new();
-    let Some(first) = samples.first() else {
+    let mut ranges = RangeSetBlaze::new();
+    if samples.is_empty() {
         return ranges;
+    }
+
+    let gap_threshold = rule.bucket_duration as i64;
+    let mut cur = rule.get_bucket_range(samples[0].timestamp);
+
+    let push_cur = |ranges: &mut RangeSetBlaze<Timestamp>, cur: (Timestamp, Timestamp)| {
+        ranges.ranges_insert(cur.0..=cur.1);
     };
 
-    let (mut start, mut end) = rule.get_bucket_range(first.timestamp);
-
-    for sample in samples.iter().skip(1) {
-        if sample.timestamp < start || sample.timestamp > end {
-            let (next_start, next_end) = rule.get_bucket_range(sample.timestamp);
-
-            // If the gap between the current end and the next start is small, merge/bridge the ranges.
-            // This makes for more efficient processing by reducing the number of iterators needed
-            // to recalculate rule aggregations.
-            // Note: `end` and `next_start` are inclusive range bounds.
-            let gap = next_start.saturating_sub(end);
-            if gap <= rule.bucket_duration as i64 {
-                end = next_end;
-            } else {
-                ranges.ranges_insert(start..=end);
-                start = next_start;
-                end = next_end;
-            }
+    for s in &samples[1..] {
+        let next = rule.get_bucket_range(s.timestamp);
+        if next.0.saturating_sub(cur.1) <= gap_threshold {
+            cur.1 = next.1;
+        } else {
+            push_cur(&mut ranges, cur);
+            cur = next;
         }
     }
 
-    ranges.ranges_insert(start..=end);
-
+    push_cur(&mut ranges, cur);
     ranges
 }
 
@@ -529,65 +541,52 @@ fn range_affects_open_bucket(rule: &CompactionRule, range: RangeInclusive<Timest
         .unwrap_or(false)
 }
 
+/// Aggregate samples in `source` over the given `range` according to `rule`.
 fn aggregate_compaction_range(
     source: &TimeSeries,
     rule: &CompactionRule,
     range: RangeInclusive<Timestamp>,
 ) -> (Vec<Sample>, Option<Aggregator>) {
-    let start = *range.start();
-    let end = *range.end();
-
-    let mut samples_out = Vec::new();
-    let mut current_bucket_start: Option<Timestamp> = None;
-    let mut aggr = rule.aggregator.clone();
-
-    // Check if the range starts within the rule's current open bucket
+    let (start, end) = (*range.start(), *range.end());
     let range_starts_in_open_bucket = range_affects_open_bucket(rule, range.clone());
 
+    let mut aggr = rule.aggregator.clone();
     if !range_starts_in_open_bucket {
         aggr.reset();
     }
 
-    let mut has_samples = false;
+    let mut samples_out = Vec::new();
+    let mut current_bucket_start: Option<Timestamp> = None;
 
     for sample in source.range_iter(start, end) {
-        let ts = sample.timestamp;
-        let sample_bucket_start = rule.calc_bucket_start(ts);
+        let bucket_start = rule.calc_bucket_start(sample.timestamp);
 
-        if let Some(cbs) = current_bucket_start {
-            if sample_bucket_start != cbs {
-                if has_samples {
-                    let is_open_bucket = rule.bucket_start.map(|obs| cbs == obs).unwrap_or(false);
-                    if !is_open_bucket {
-                        samples_out.push(Sample::new(cbs, aggr.finalize()));
-                        aggr.reset();
-                    }
-                }
-                current_bucket_start = Some(sample_bucket_start);
+        // Finalize the previous bucket if we've moved to a new one
+        if let Some(prev_bucket) = current_bucket_start
+            && bucket_start != prev_bucket
+        {
+            let is_open = rule.bucket_start == Some(prev_bucket);
+            if !is_open {
+                samples_out.push(Sample::new(prev_bucket, aggr.finalize()));
+                aggr.reset();
             }
-        } else {
-            current_bucket_start = Some(sample_bucket_start);
         }
 
+        current_bucket_start = Some(bucket_start);
         aggr.update(sample.timestamp, sample.value);
-        has_samples = true;
     }
 
-    // Handle the final bucket
-    if has_samples && let Some(cbs) = current_bucket_start {
+    // Handle final bucket
+    if let Some(bucket) = current_bucket_start {
         let is_still_open = rule
             .bucket_start
-            .map(|start| {
-                let bucket_end = start.saturating_add_unsigned(rule.bucket_duration);
-                cbs == start && end < bucket_end
-            })
+            .map(|bs| bucket == bs && end < bs.saturating_add_unsigned(rule.bucket_duration))
             .unwrap_or(false);
 
-        if !is_still_open {
-            samples_out.push(Sample::new(cbs, aggr.finalize()));
-        } else {
+        if is_still_open {
             return (samples_out, Some(aggr));
         }
+        samples_out.push(Sample::new(bucket, aggr.finalize()));
     }
 
     (samples_out, None)
@@ -698,7 +697,7 @@ mod tests {
         assert!(series.chunks.len() >= 2);
 
         // Disable retention to ensure samples are not filtered.
-        series.retention = std::time::Duration::ZERO;
+        series.retention = Duration::ZERO;
 
         // Find two adjacent chunks where we can pick timestamps that are exclusive to each chunk.
         // This avoids relying on boundary timestamps and avoids assumptions about overlapping ranges.
@@ -855,7 +854,7 @@ mod tests {
         let ctx = Context::dummy();
         let mut series = TimeSeries::default();
 
-        let samples: Vec<_> = generate_random_samples(10_000);
+        let samples: Vec<_> = generate_random_samples(MAX_SAMPLES_PER_INSERT);
         let results = bulk_insert_samples(&ctx, &mut series, &samples, None);
 
         assert_eq!(results.len(), 10_000);
@@ -885,6 +884,58 @@ mod tests {
             assert_eq!(sample.timestamp, sample2.timestamp);
             assert_eq!(sample.value, sample2.value);
         }
+    }
+
+    #[test]
+    fn bulk_insert_inserts_into_existing_chunks_and_creates_new_chunks_in_one_call() {
+        let ctx = Context::dummy();
+        let mut series = TimeSeries::default();
+
+        // Seed enough data to ensure we have at least one existing chunk with a well-defined range.
+        let seed: Vec<Sample> = (0..5_000).map(|i| s(i * 10, i as f64)).collect();
+        bulk_insert_samples(&ctx, &mut series, &seed, None);
+
+        // Make sure retention doesn't filter anything in this test.
+        series.retention = Duration::ZERO;
+
+        let chunks_before = series.chunks.len();
+        assert!(chunks_before >= 1);
+
+        // Pick a timestamp that we know lies inside an *existing* chunk.
+        let c0 = &series.chunks[0];
+        let existing_ts = c0
+            .first_timestamp()
+            .saturating_add((c0.last_timestamp().saturating_sub(c0.first_timestamp())) / 2);
+        assert!(c0.is_timestamp_in_range(existing_ts));
+
+        // Pick timestamps that are strictly newer than the last existing timestamp to force creation of new chunk(s).
+        let last_max = series.chunks.last().unwrap().last_timestamp();
+        let new_ts_1 = last_max + 10;
+        let new_ts_2 = last_max + 20;
+
+        let samples = vec![
+            s(existing_ts, 123.0),
+            s(new_ts_1, 456.0),
+            s(new_ts_2, 789.0),
+        ];
+
+        let results = bulk_insert_samples(&ctx, &mut series, &samples, None);
+
+        // All inserts should succeed.
+        assert_eq!(results.len(), samples.len());
+        assert!(results.iter().all(|r| matches!(r, SampleAddResult::Ok(_))));
+
+        // We should have inserted into an existing chunk AND created at least one new chunk.
+        assert!(series.chunks.len() > chunks_before);
+
+        // Validate the timestamps are present in the series after insertion.
+        let stored_ts: Vec<i64> = series.iter().map(|smpl| smpl.timestamp).collect();
+        assert!(stored_ts.contains(&existing_ts));
+        assert!(stored_ts.contains(&new_ts_1));
+        assert!(stored_ts.contains(&new_ts_2));
+
+        // Metadata sanity: last timestamp must advance to the newest inserted sample.
+        assert_eq!(series.last_timestamp(), new_ts_2);
     }
 
     #[test]

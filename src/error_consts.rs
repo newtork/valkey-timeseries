@@ -92,3 +92,4 @@ pub const WITH_LABELS_AND_SELECTED_LABELS_SPECIFIED: &str =
 pub const COMPACTION_CIRCULAR_DEPENDENCY: &str = "TSDB: circular dependency in compaction rules";
 pub const COMPACTION_RULE_NOT_FOUND: &str = "TSDB: compaction rule does not exist";
 pub const INVALID_COMPARISON_OPERATOR: &str = "TSDB: invalid comparison operator";
+pub const TOO_MANY_SAMPLES: &str = "TSDB: too many samples";
