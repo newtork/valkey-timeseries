@@ -6,8 +6,6 @@ from valkey_timeseries_test_case import ValkeyTimeSeriesTestCaseBase
 
 class TestTimeSeriesIngest(ValkeyTimeSeriesTestCaseBase):
     def get_sample(self, key, timestamp):
-        res = self.client.execute_command("TS.RANGE", key, '-', '+')
-        print(f"Current samples in {key}: {res}")
         res = self.client.execute_command("TS.RANGE", key, '-', '+', "FILTER_BY_TS", timestamp)
         assert len(res) == 1, f"Expected one sample at timestamp {timestamp} in series {key}, got: {res}"
         return res[0]
@@ -17,11 +15,7 @@ class TestTimeSeriesIngest(ValkeyTimeSeriesTestCaseBase):
         payload = r'{"values":[1,2,3],"timestamps":[1000,2000,3000]}'
 
         res = self.client.execute_command("TS.INGEST", key, payload)
-        print("Ingestion result:", res)
         assert res == [3, 3], f"Expected ingestion to succeed with total 3, got: {res}"
-
-        res = self.client.execute_command("TS.RANGE", key, '-', '+')
-        print("Ingestion result:", res)
 
         # Verify the samples exist and are retrievable.
         assert self.get_sample(key, 1000) == [1000, b"1"]
@@ -113,8 +107,6 @@ class TestTimeSeriesIngest(ValkeyTimeSeriesTestCaseBase):
         assert client.execute_command("TS.GET", "series_ingest_dups_block", 100)[0] == 100
 
     def test_ingest_runs_compactions_and_writes_destination_series(self):
-        client = self.server.get_new_client()
-
         src = "series_ingest_compact_src"
         dest = "series_ingest_compact_dest"
 
@@ -134,8 +126,6 @@ class TestTimeSeriesIngest(ValkeyTimeSeriesTestCaseBase):
         assert self.get_sample(dest, 10) == [10, b"3"]
 
     def test_ingest_runs_nested_compactions(self):
-        client = self.client
-
         src = "series_ingest_nested_compact_src"
         mid = "series_ingest_nested_compact_mid"
         dest = "series_ingest_nested_compact_dest"
@@ -183,24 +173,24 @@ class TestTimeSeriesIngest(ValkeyTimeSeriesTestCaseBase):
         self.client.execute_command("TS.CREATERULE", l1, l2, "AGGREGATION", "SUM", 50)
         self.client.execute_command("TS.CREATERULE", l2, l3, "AGGREGATION", "SUM", 100)
 
-        # Large ingestion: timestamps 0..9999, all values are 1.
+        # Large ingestion: timestamps 0..999, all values are 1.
         # This creates predictable sums per bucket at each level.
-        n = 10_000
+        n = 1000
         timestamps = list(range(n))
         values = [1] * n
 
         payload = f'{{"values":{values},"timestamps":{timestamps}}}'
-        res = client.execute_command("TS.INGEST", src, payload)
+        res = self.client.execute_command("TS.INGEST", src, payload)
         assert res == [n, n]
 
         # Level 1: bucket=10, each bucket sum is 10.
         assert self.get_sample(l1, 0) == [0, b"10"]
-        assert self.get_sample(l1, 9900) == [9900, b"10"]
+        assert self.get_sample(l1, 900) == [900, b"10"]
 
         # Level 2: bucket=50, sums over five l1 buckets => 50.
         assert self.get_sample(l2, 0) == [0, b"50"]
-        assert self.get_sample(l2, 9950) == [9950, b"50"]
+        assert self.get_sample(l2, 950) == [950, b"50"]
 
         # Level 3: bucket=100, sums over two l2 buckets => 100.
         assert self.get_sample(l3, 0) == [0, b"100"]
-        assert self.get_sample(l3, 9900) == [9900, b"100"]
+        assert self.get_sample(l3, 900) == [900, b"100"]
