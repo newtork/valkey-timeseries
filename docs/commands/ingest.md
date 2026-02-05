@@ -181,13 +181,13 @@ TS.INGEST sensor:temp:room1 '{"values":[22.5,22.6,25.0],"timestamps":[1620000000
 
 ## Notes
 
-- if the key does not exist, it will be created with the provided options
+- If the key does not exist, it will be created with the provided options
 - Input samples are sorted by timestamp before insertion
 - Samples are **not** guaranteed to be inserted in the same order as the input when timestamps differ across chunk
   boundaries
 - Retention filtering occurs **before** chunk grouping and insertion
 - The ingested count may be less than the payload count if samples are dropped due to retention, duplicates, or filters
-- When series doesn't exist and no options are provided, module-level defaults apply
+- When the series doesn't exist and no options are provided, module-level defaults apply
 - For bulk ingestion from external sources (e.g., Prometheus, VictoriaMetrics), this command provides an efficient
   single-call interface
 
