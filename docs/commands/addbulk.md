@@ -1,11 +1,11 @@
-# TS.INGEST
+# TS.ADDBULK
 
 Ingest time-series samples from a JSON payload into a series.
 
 ## Syntax
 
 ```
-TS.INGEST key data 
+TS.ADDBULK key data 
   [RETENTION duration] 
   [DUPLICATE_POLICY policy] 
   [ON_DUPLICATE policy_ovr] 
@@ -130,7 +130,7 @@ The `data` argument expects a JSON object with the following structure:
 Ingest two samples into a series:
 
 ```valkey-cli
-TS.INGEST sensor:temp:room1 '{"values":[22.5,23.1],"timestamps":[1620000000000,1620000060000]}'
+TS.ADDBULK sensor:temp:room1 '{"values":[22.5,23.1],"timestamps":[1620000000000,1620000060000]}'
 ```
 
 **Result:**
@@ -143,13 +143,13 @@ TS.INGEST sensor:temp:room1 '{"values":[22.5,23.1],"timestamps":[1620000000000,1
 ### Create series with custom options
 
 ```valkey-cli
-TS.INGEST sensor:pressure:tank2 '{"values":[101.3,101.5],"timestamps":[1620000000000,1620000001000]}' RETENTION 86400000 CHUNK_SIZE 8192 DUPLICATE_POLICY LAST LABELS sensor_type pressure location tank2
+TS.ADDBULK sensor:pressure:tank2 '{"values":[101.3,101.5],"timestamps":[1620000000000,1620000001000]}' RETENTION 86400000 CHUNK_SIZE 8192 DUPLICATE_POLICY LAST LABELS sensor_type pressure location tank2
 ```
 
 ### Override duplicate policy
 
 ```valkey-cli
-TS.INGEST sensor:temp:room1 '{"values":[22.5,22.8],"timestamps":[1620000000000,1620000000000]}' ON_DUPLICATE MAX
+TS.ADDBULK sensor:temp:room1 '{"values":[22.5,22.8],"timestamps":[1620000000000,1620000000000]}' ON_DUPLICATE MAX
 ```
 
 **Result:**
@@ -164,7 +164,7 @@ TS.INGEST sensor:temp:room1 '{"values":[22.5,22.8],"timestamps":[1620000000000,1
 ### With value filtering
 
 ```valkey-cli
-TS.INGEST sensor:temp:room1 '{"values":[22.5,22.6,25.0],"timestamps":[1620000000000,1620000001000,1620000002000]}' IGNORE 5000 2.0
+TS.ADDBULK sensor:temp:room1 '{"values":[22.5,22.6,25.0],"timestamps":[1620000000000,1620000001000,1620000002000]}' IGNORE 5000 2.0
 ```
 
 *Samples exceeding 2.0 difference or 5000ms gap from previous sample are dropped.*

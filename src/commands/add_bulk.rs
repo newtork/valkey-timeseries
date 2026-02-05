@@ -6,7 +6,7 @@ use crate::series::{
 use valkey_module::{AclPermissions, Context, ValkeyResult, ValkeyString, ValkeyValue};
 
 ///
-/// TS.INGEST key data
+/// TS.ADDBULK key data
 ///     [RETENTION duration]
 ///     [DUPLICATE_POLICY policy]
 ///     [ON_DUPLICATE policy_ovr]
@@ -16,7 +16,7 @@ use valkey_module::{AclPermissions, Context, ValkeyResult, ValkeyString, ValkeyV
 ///     [IGNORE ignoreMaxTimediff ignoreMaxValDiff]
 ///     [SIGNIFICANT_DIGITS significantDigits | DECIMAL_DIGITS decimalDigits]
 ///
-pub fn ingest(ctx: &Context, args: Vec<ValkeyString>) -> ValkeyResult {
+pub fn add_bulk(ctx: &Context, args: Vec<ValkeyString>) -> ValkeyResult {
     if args.len() < 3 {
         return Err(valkey_module::ValkeyError::WrongArity);
     }
