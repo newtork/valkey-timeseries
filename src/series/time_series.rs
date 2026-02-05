@@ -228,6 +228,9 @@ impl TimeSeries {
 
     pub(super) fn add_sample_internal(&mut self, sample: Sample) -> SampleAddResult {
         let chunk = self.get_last_chunk();
+        if chunk.is_full() {
+            return self.handle_full_chunk(sample);
+        }
         match chunk.add_sample(&sample) {
             Ok(_) => {
                 self.record_appended_sample(sample);

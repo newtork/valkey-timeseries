@@ -231,7 +231,7 @@ mod tests {
             .start(1000)
             .interval(Duration::from_millis(1000))
             .algorithm(RandAlgo::Deriv)
-            .samples(40)
+            .samples(60)
             .build()
             .generate();
 
