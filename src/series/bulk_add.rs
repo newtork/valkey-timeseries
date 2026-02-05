@@ -854,7 +854,7 @@ mod tests {
         let ctx = Context::dummy();
         let mut series = TimeSeries::default();
 
-        let samples: Vec<_> = generate_random_samples(MAX_SAMPLES_PER_INSERT);
+        let samples: Vec<_> = generate_random_samples(10_000);
         let results = bulk_insert_samples(&ctx, &mut series, &samples, None);
 
         assert_eq!(results.len(), 10_000);
